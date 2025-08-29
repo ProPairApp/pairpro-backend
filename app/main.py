@@ -24,19 +24,20 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL env var is not set")
 
-engine = create_engine(DATABASE_URL)
+# psycopg v3 needs the 'postgresql+psycopg' dialect
+db_url = DATABASE_URL
+if db_url.startswith("postgresql://"):
+    db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+# Railway public URLs usually require SSL
+engine = create_engine(
+    db_url,
+    pool_pre_ping=True,
+    connect_args={"sslmode": "require"}
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
-class Provider(Base):
-    __tablename__ = "providers"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    rating = Column(Numeric, nullable=True)
-
-@app.on_event("startup")
-def on_startup():
-    Base.metadata.create_all(bind=engine)
 
 # ---------- Schemas ----------
 class ProviderIn(BaseModel):

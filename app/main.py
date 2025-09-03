@@ -45,25 +45,23 @@ class Provider(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     rating = Column(Float, nullable=True)
+    service_type = Column(String, nullable=True)  # must exist
+    city = Column(String, nullable=True)          # must exist
 
-# create table(s) at startup so you don't have to run SQL manually
-@app.on_event("startup")
-def on_startup():
-    Base.metadata.create_all(bind=engine)
-
-# ---------- Pydantic schemas ----------
 class ProviderIn(BaseModel):
     name: str
     rating: Optional[float] = None
+    service_type: Optional[str] = None
+    city: Optional[str] = None
 
 class ProviderOut(BaseModel):
     id: int
     name: str
     rating: Optional[float] = None
-
+    service_type: Optional[str] = None
+    city: Optional[str] = None
     class Config:
-        from_attributes = True  # so we can return SQLAlchemy objects
-
+        from_attributes = True
 # ---------- Routes ----------
 @app.get("/health")
 def health():

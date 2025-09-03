@@ -75,11 +75,21 @@ def health():
     return {"ok": True}
 
 @app.get("/providers", response_model=List[ProviderOut])
-def list_providers():
-    with SessionLocal() as db:
-        items = db.query(Provider).order_by(Provider.id.asc()).all()
-        return items
+from fastapi import Query
 
+@app.get("/providers", response_model=List[ProviderOut])
+def list_providers(
+    city: Optional[str] = Query(None),
+    service_type: Optional[str] = Query(None)
+):
+    with SessionLocal() as db:
+        query = db.query(Provider)
+        if city:
+            query = query.filter(Provider.city.ilike(f"%{city}%"))
+        if service_type:
+            query = query.filter(Provider.service_type.ilike(f"%{service_type}%"))
+        items = query.order_by(Provider.id.asc()).all()
+        return items
 @app.post("/providers", response_model=ProviderOut)
 def create_provider(p: ProviderIn):
     with SessionLocal() as db:

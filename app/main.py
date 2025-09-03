@@ -1,9 +1,21 @@
 import os
 from typing import List, Optional
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi import Query
+
+@app.get("/providers", response_model=List[ProviderOut])
+def list_providers(
+    city: Optional[str] = Query(None),
+    service_type: Optional[str] = Query(None)
+):
+    with SessionLocal() as db:
+        query = db.query(Provider)
+        if city:
+            query = query.filter(Provider.city.ilike(f"%{city}%"))
+        if service_type:
+            query = query.filter(Provider.service_type.ilike(f"%{service_type}%"))
+        items = query.order_by(Provider.id.asc()).all()
+        return items
 
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.orm import sessionmaker, declarative_base

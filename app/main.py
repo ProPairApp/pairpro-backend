@@ -17,9 +17,6 @@ def list_providers(
         items = query.order_by(Provider.id.asc()).all()
         return items
 
-from sqlalchemy import create_engine, Column, Integer, String, Float
-from sqlalchemy.orm import sessionmaker, declarative_base
-
 # ---------- FastAPI ----------
 app = FastAPI(title="PairPro API (DB Starter)", version="0.1.2")
 

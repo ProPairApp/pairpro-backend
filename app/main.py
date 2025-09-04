@@ -3,21 +3,32 @@ from typing import List, Optional
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, Text, ForeignKey, DateTime, func
+)
+from sqlalchemy.orm import sessionmaker, declarative_base
+
+# ---------- FastAPI ----------
+app = FastAPI(title="PairPro API (DB + Filters + Reviews)", version="0.3.1")
+
+# ---------- CORS (put AFTER app = FastAPI) ----------
 # List every frontend URL that should be allowed to call your backend
 FRONTEND_ORIGINS = [
     "https://pairpro-frontend-git-main-propairapps-projects.vercel.app",
-    # Later, when you have a production domain, add it here too:
+    # When you have a production domain, add it here too, e.g.:
     # "https://pairpro-frontend.vercel.app",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,  # ✅ only these origins are allowed
-    allow_credentials=False,         # ✅ safe: we’re not using cookies yet
-    allow_methods=["*"],             # ✅ allow GET, POST, etc.
-    allow_headers=["*"],             # ✅ allow all headers
+    allow_origins=FRONTEND_ORIGINS,  # explicit origins (no "*")
+    allow_credentials=False,         # we’re not using cookies yet
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
 # ---------- Database ----------
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -87,11 +98,12 @@ class ReviewOut(BaseModel):
     class Config:
         from_attributes = True
 
-# ---------- Routes (Providers) ----------
+# ---------- Routes ----------
 @app.get("/health")
 def health():
     return {"ok": True}
 
+# List providers (with optional filters)
 @app.get("/providers", response_model=List[ProviderOut])
 def list_providers(
     city: Optional[str] = Query(None),
@@ -106,6 +118,7 @@ def list_providers(
         items = query.order_by(Provider.id.asc()).all()
         return items
 
+# Get one provider
 @app.get("/providers/{provider_id}", response_model=ProviderOut)
 def get_provider(provider_id: int):
     with SessionLocal() as db:
@@ -114,6 +127,7 @@ def get_provider(provider_id: int):
             raise HTTPException(status_code=404, detail="Provider not found")
         return obj
 
+# Create provider
 @app.post("/providers", response_model=ProviderOut)
 def create_provider(p: ProviderIn):
     with SessionLocal() as db:
@@ -128,11 +142,10 @@ def create_provider(p: ProviderIn):
         db.refresh(obj)
         return obj
 
-# ---------- Routes (Reviews) ----------
+# List reviews for a provider
 @app.get("/providers/{provider_id}/reviews", response_model=List[ReviewOut])
 def list_reviews(provider_id: int):
     with SessionLocal() as db:
-        # ensure provider exists
         prov = db.get(Provider, provider_id)
         if not prov:
             raise HTTPException(status_code=404, detail="Provider not found")
@@ -140,6 +153,7 @@ def list_reviews(provider_id: int):
                                .order_by(Review.created_at.desc()).all()
         return rows
 
+# Create a review and update provider average rating
 @app.post("/providers/{provider_id}/reviews", response_model=ReviewOut)
 def create_review(provider_id: int, r: ReviewIn):
     with SessionLocal() as db:
@@ -147,7 +161,6 @@ def create_review(provider_id: int, r: ReviewIn):
         if not prov:
             raise HTTPException(status_code=404, detail="Provider not found")
 
-        # save review
         review = Review(provider_id=provider_id, stars=r.stars, comment=r.comment)
         db.add(review)
         db.commit()

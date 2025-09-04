@@ -21,14 +21,15 @@ FRONTEND_ORIGINS = [
     # "https://pairpro-frontend.vercel.app",
 ]
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,  # explicit origins (no "*")
-    allow_credentials=False,         # we’re not using cookies yet
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],     # TEMP: allow every origin so POST works from any Vercel URL
+    allow_credentials=False, # important: keep False when using "*"
+    allow_methods=["*"],     # allow GET/POST/OPTIONS, etc.
+    allow_headers=["*"],     # allow Content-Type, etc.
 )
-
 # ---------- Database ----------
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:

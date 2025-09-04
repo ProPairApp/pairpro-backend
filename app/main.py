@@ -3,24 +3,21 @@ from typing import List, Optional
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
-from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Text, ForeignKey, DateTime, func
-)
-from sqlalchemy.orm import sessionmaker, declarative_base
-
-# ---------- FastAPI ----------
-app = FastAPI(title="PairPro API (DB + Filters + Reviews)", version="0.3.0")
+# List every frontend URL that should be allowed to call your backend
+FRONTEND_ORIGINS = [
+    "https://pairpro-frontend-git-main-propairapps-projects.vercel.app",
+    # Later, when you have a production domain, add it here too:
+    # "https://pairpro-frontend.vercel.app",
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # open while learning
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=FRONTEND_ORIGINS,  # ✅ only these origins are allowed
+    allow_credentials=False,         # ✅ safe: we’re not using cookies yet
+    allow_methods=["*"],             # ✅ allow GET, POST, etc.
+    allow_headers=["*"],             # ✅ allow all headers
 )
-
 # ---------- Database ----------
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:

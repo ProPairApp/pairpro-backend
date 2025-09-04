@@ -3,7 +3,19 @@ import os
 from typing import List, Optional
 
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+FRONTEND_ORIGINS = [
+    "https://pairpro-frontend-git-main-propairapps-projects.vercel.app",
+    # later add your production domain, e.g.:
+    # "https://pairpro.vercel.app"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=FRONTEND_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 from pydantic import BaseModel, Field
 
 from sqlalchemy import (

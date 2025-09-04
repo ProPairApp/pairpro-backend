@@ -120,7 +120,26 @@ def root():
 @app.get("/health")
 def health():
     return {"ok": True}
-
+# Seed a few providers to verify DB writes work
+@app.post("/seed")
+def seed():
+    try:
+        sample = [
+            {"name": "Roof Pro", "service_type": "Roofing", "city": "Miami", "rating": 4.9},
+            {"name": "Amelia Painter", "service_type": "Painting", "city": "Orlando", "rating": 4.7},
+            {"name": "Siding & Co", "service_type": "Siding", "city": "Tampa", "rating": 4.5},
+        ]
+        created = []
+        with SessionLocal() as db:
+            for s in sample:
+                obj = Provider(**s)
+                db.add(obj)
+                db.commit()
+                db.refresh(obj)
+                created.append({"id": obj.id, "name": obj.name})
+        return {"ok": True, "created": created}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Seed failed: {type(e).__name__}: {e}")
 # List providers (with optional filters)
 @app.get("/providers", response_model=List[ProviderOut])
 def list_providers(
@@ -144,21 +163,24 @@ def get_provider(provider_id: int):
         if not obj:
             raise HTTPException(status_code=404, detail="Provider not found")
         return obj
-
-# Create provider
+# Create provider (better error messages)
 @app.post("/providers", response_model=ProviderOut)
 def create_provider(p: ProviderIn):
-    with SessionLocal() as db:
-        obj = Provider(
-            name=p.name,
-            rating=p.rating,
-            service_type=p.service_type,
-            city=p.city,
-        )
-        db.add(obj)
-        db.commit()
-        db.refresh(obj)
-        return obj
+    try:
+        with SessionLocal() as db:
+            obj = Provider(
+                name=p.name,
+                rating=p.rating,
+                service_type=p.service_type,
+                city=p.city,
+            )
+            db.add(obj)
+            db.commit()
+            db.refresh(obj)
+            return obj
+    except Exception as e:
+        # surface DB or driver errors so we can see what's wrong
+        raise HTTPException(status_code=500, detail=f"Create failed: {type(e).__name__}: {e}")
 
 # List reviews for a provider
 @app.get("/providers/{provider_id}/reviews", response_model=List[ReviewOut])

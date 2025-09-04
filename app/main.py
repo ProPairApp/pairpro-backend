@@ -1,21 +1,9 @@
-from datetime import datetime
 import os
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import FastAPI, Query, HTTPException
-FRONTEND_ORIGINS = [
-    "https://pairpro-frontend-git-main-propairapps-projects.vercel.app",
-    # later add your production domain, e.g.:
-    # "https://pairpro.vercel.app"
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from sqlalchemy import (
@@ -23,32 +11,38 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# ---------- FastAPI ----------
-app = FastAPI(title="PairPro API (DB + Filters + Reviews)", version="0.3.1")
+# ---------------------------
+# FastAPI app
+# ---------------------------
+app = FastAPI(title="PairPro API", version="0.4.0")
 
-# ---------- CORS (put AFTER app = FastAPI) ----------
-# List every frontend URL that should be allowed to call your backend
+# ---------------------------
+# CORS (allow your Vercel sites)
+# ---------------------------
 FRONTEND_ORIGINS = [
+    # Preview (your current working frontend)
     "https://pairpro-frontend-git-main-propairapps-projects.vercel.app",
-    # When you have a production domain, add it here too, e.g.:
-    # "https://pairpro-frontend.vercel.app",
-]
 
-from fastapi.middleware.cors import CORSMiddleware
+    # TODO: when you create a production domain, add it here and remove the comment:
+    # "https://pairpro.vercel.app",
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],     # TEMP: allow every origin so POST works from any Vercel URL
-    allow_credentials=False, # important: keep False when using "*"
-    allow_methods=["*"],     # allow GET/POST/OPTIONS, etc.
-    allow_headers=["*"],     # allow Content-Type, etc.
+    allow_origins=FRONTEND_ORIGINS,  # explicit origins
+    allow_credentials=False,         # not using cookies yet
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-# ---------- Database ----------
+
+# ---------------------------
+# Database setup
+# ---------------------------
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL env var is not set")
 
-# psycopg v3 needs the 'postgresql+psycopg' dialect
+# Ensure SQLAlchemy uses the psycopg driver string
 db_url = DATABASE_URL
 if db_url.startswith("postgresql://"):
     db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
@@ -61,12 +55,14 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
-# ---------- Models ----------
+# ---------------------------
+# Models (SQLAlchemy)
+# ---------------------------
 class Provider(Base):
     __tablename__ = "providers"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    rating = Column(Float, nullable=True)           # store avg rating
+    rating = Column(Float, nullable=True)           # average rating
     service_type = Column(String, nullable=True)
     city = Column(String, nullable=True)
 
@@ -78,12 +74,14 @@ class Review(Base):
     comment = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-# Create any missing tables at startup
+# Create tables on startup (safe if they already exist)
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)
 
-# ---------- Schemas ----------
+# ---------------------------
+# Schemas (Pydantic)
+# ---------------------------
 class ProviderIn(BaseModel):
     name: str
     rating: Optional[float] = None
@@ -100,7 +98,7 @@ class ProviderOut(BaseModel):
         from_attributes = True
 
 class ReviewIn(BaseModel):
-    stars: int = Field(..., ge=1, le=5)   # 1-5 only
+    stars: int = Field(..., ge=1, le=5)   # 1–5 only
     comment: Optional[str] = None
 
 class ReviewOut(BaseModel):
@@ -108,11 +106,17 @@ class ReviewOut(BaseModel):
     provider_id: int
     stars: int
     comment: Optional[str] = None
-    created_at: datetime
+    created_at: datetime                 # IMPORTANT: datetime, not string
     class Config:
         from_attributes = True
 
-# ---------- Routes ----------
+# ---------------------------
+# Routes
+# ---------------------------
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "PairPro API"}
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -163,8 +167,10 @@ def list_reviews(provider_id: int):
         prov = db.get(Provider, provider_id)
         if not prov:
             raise HTTPException(status_code=404, detail="Provider not found")
-        rows = db.query(Review).filter(Review.provider_id == provider_id)\
-                               .order_by(Review.created_at.desc()).all()
+        rows = db.query(Review)\
+                 .filter(Review.provider_id == provider_id)\
+                 .order_by(Review.created_at.desc())\
+                 .all()
         return rows
 
 # Create a review and update provider average rating
@@ -180,7 +186,7 @@ def create_review(provider_id: int, r: ReviewIn):
         db.commit()
         db.refresh(review)
 
-        # recalc average rating on provider
+        # recalc avg rating for provider
         agg = db.query(func.avg(Review.stars)).filter(Review.provider_id == provider_id).scalar()
         prov.rating = float(agg) if agg is not None else None
         db.add(prov)

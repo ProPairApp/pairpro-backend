@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 from typing import List, Optional
 
@@ -95,7 +96,7 @@ class ReviewOut(BaseModel):
     provider_id: int
     stars: int
     comment: Optional[str] = None
-    created_at: str
+    created_at: datetime
     class Config:
         from_attributes = True
 

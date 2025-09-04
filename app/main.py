@@ -1,24 +1,15 @@
 import os
 from typing import List, Optional
 
-from fastapi import Query
+from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-@app.get("/providers", response_model=List[ProviderOut])
-def list_providers(
-    city: Optional[str] = Query(None),
-    service_type: Optional[str] = Query(None)
-):
-    with SessionLocal() as db:
-        query = db.query(Provider)
-        if city:
-            query = query.filter(Provider.city.ilike(f"%{city}%"))
-        if service_type:
-            query = query.filter(Provider.service_type.ilike(f"%{service_type}%"))
-        items = query.order_by(Provider.id.asc()).all()
-        return items
+from sqlalchemy import create_engine, Column, Integer, String, Float
+from sqlalchemy.orm import sessionmaker, declarative_base
 
 # ---------- FastAPI ----------
-app = FastAPI(title="PairPro API (DB Starter)", version="0.1.2")
+app = FastAPI(title="PairPro API (DB + Filters)", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,21 +38,21 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
-# ---------- SQLAlchemy model (with service_type + city) ----------
+# ---------- Model ----------
 class Provider(Base):
     __tablename__ = "providers"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     rating = Column(Float, nullable=True)
-    service_type = Column(String, nullable=True)  # NEW
-    city = Column(String, nullable=True)          # NEW
+    service_type = Column(String, nullable=True)
+    city = Column(String, nullable=True)
 
-# Create table(s) at startup (adds table if missing; won't add columns if table already exists)
+# Create tables at startup (adds table if missing)
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)
 
-# ---------- Pydantic schemas (include the new fields) ----------
+# ---------- Schemas ----------
 class ProviderIn(BaseModel):
     name: str
     rating: Optional[float] = None
@@ -74,7 +65,6 @@ class ProviderOut(BaseModel):
     rating: Optional[float] = None
     service_type: Optional[str] = None
     city: Optional[str] = None
-
     class Config:
         from_attributes = True
 
@@ -84,12 +74,9 @@ def health():
     return {"ok": True}
 
 @app.get("/providers", response_model=List[ProviderOut])
-from fastapi import Query
-
-@app.get("/providers", response_model=List[ProviderOut])
 def list_providers(
     city: Optional[str] = Query(None),
-    service_type: Optional[str] = Query(None)
+    service_type: Optional[str] = Query(None),
 ):
     with SessionLocal() as db:
         query = db.query(Provider)
@@ -99,14 +86,15 @@ def list_providers(
             query = query.filter(Provider.service_type.ilike(f"%{service_type}%"))
         items = query.order_by(Provider.id.asc()).all()
         return items
+
 @app.post("/providers", response_model=ProviderOut)
 def create_provider(p: ProviderIn):
     with SessionLocal() as db:
         obj = Provider(
             name=p.name,
             rating=p.rating,
-            service_type=p.service_type,  # NEW
-            city=p.city,                  # NEW
+            service_type=p.service_type,
+            city=p.city,
         )
         db.add(obj)
         db.commit()

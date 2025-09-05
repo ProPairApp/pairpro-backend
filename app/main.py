@@ -198,11 +198,15 @@ def list_reviews(provider_id: int):
         prov = db.get(Provider, provider_id)
         if not prov:
             raise HTTPException(status_code=404, detail="Provider not found")
-        rows = db.query(Review)\
-                 .filter(Review.provider_id == provider_id)\
-                 .order_by(Review.created_at.desc())\
-                 .all()
-        return rows
+        rows = (
+            db.query(Review)
+            .filter(Review.provider_id == provider_id)
+            .order_by(Review.created_at.desc())
+            .all()
+        )
+        # ⭐ Convert to Pydantic while session is open
+        return [ReviewOut.model_validate(r, from_attributes=True) for r in rows]
+
 
 # Create a review and update provider average rating
 @app.post("/providers/{provider_id}/reviews", response_model=ReviewOut)
@@ -217,10 +221,12 @@ def create_review(provider_id: int, r: ReviewIn):
         db.commit()
         db.refresh(review)
 
-        # recalc avg rating for provider
+        # recalc average rating on provider
         agg = db.query(func.avg(Review.stars)).filter(Review.provider_id == provider_id).scalar()
         prov.rating = float(agg) if agg is not None else None
         db.add(prov)
         db.commit()
 
-        return review
+        # ⭐ Build the response *before* leaving the 'with' (session still open)
+        out = ReviewOut.model_validate(review, from_attributes=True)
+        return out

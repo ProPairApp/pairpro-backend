@@ -46,8 +46,7 @@ engine = create_engine(
     db_url,
     pool_pre_ping=True,
     connect_args={"sslmode": "require"},
-)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+)SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 Base = declarative_base()
 
 # ---------------------------

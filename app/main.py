@@ -155,7 +155,22 @@ def list_providers(
             query = query.filter(Provider.service_type.ilike(f"%{service_type}%"))
         items = query.order_by(Provider.id.asc()).all()
         return items
+from fastapi import HTTPException
+from sqlalchemy import func
 
+@app.get("/providers/{provider_id}/stats")
+def provider_stats(provider_id: int):
+    with SessionLocal() as db:
+        prov = db.get(Provider, provider_id)
+        if not prov:
+            raise HTTPException(status_code=404, detail="Provider not found")
+        count = db.query(func.count(Review.id)).filter(Review.provider_id == provider_id).scalar()
+        avg = db.query(func.avg(Review.stars)).filter(Review.provider_id == provider_id).scalar()
+        return {
+            "provider_id": provider_id,
+            "review_count": int(count or 0),
+            "avg_stars": float(avg) if avg is not None else None,
+        }
 # Get one provider
 @app.get("/providers/{provider_id}", response_model=ProviderOut)
 def get_provider(provider_id: int):

@@ -21,17 +21,11 @@ app = FastAPI(title="PairPro API", version="0.4.0")
 # ---------------------------
 from fastapi.middleware.cors import CORSMiddleware
 
-FRONTEND_ORIGINS = [
-    # Preview (you used this earlier)
-    "https://pairpro-frontend-git-main-propairapps-projects.vercel.app",
-    # Production (the one you’re using now)
-    "https://pairpro-frontend.vercel.app",
-]
-
+# Allow ANY vercel.app subdomain (covers preview & production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,
-    allow_credentials=False,  # we’re not using cookies yet
+    allow_origin_regex=r"https://.*vercel\.app$",
+    allow_credentials=False,         # no cookies yet
     allow_methods=["*"],
     allow_headers=["*"],
 )

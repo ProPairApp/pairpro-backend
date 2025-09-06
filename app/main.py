@@ -1,4 +1,5 @@
 # app/main.py
+# ----- Config -----
 import os
 from datetime import datetime, timedelta
 from typing import Optional, List
@@ -13,8 +14,21 @@ from passlib.context import CryptContext
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
-# ----- Config -----
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./pairpro.db")
+# DB URL with dev fallback (SQLite)
+RAW_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if not RAW_DATABASE_URL:
+    # Dev fallback
+    DATABASE_URL = "sqlite:///./pairpro.db"
+else:
+    # Normalize Postgres URLs to psycopg2 driver
+    url = RAW_DATABASE_URL
+    # Railway/Heroku often give `postgres://...`; SQLAlchemy prefers `postgresql+psycopg2://...`
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg2://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    DATABASE_URL = url
+
 JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME_SUPER_SECRET")
 JWT_ALG = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
@@ -23,9 +37,16 @@ RESET_TOKEN_MINUTES = 30
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ----- DB -----
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+# For SQLite, pass connect_args; for Postgres, leave default.
+if DATABASE_URL.startswith("sqlite:///"):
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 Base = declarative_base()
+
+print(f"[PairPro] Using DB: {DATABASE_URL}")
 
 # ----- Models -----
 class User(Base):

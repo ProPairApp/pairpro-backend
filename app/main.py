@@ -1,148 +1,119 @@
+# app/main.py
 import os
 from datetime import datetime, timedelta
-from typing import List, Optional, Literal
+from typing import Optional, List
 
-from fastapi import FastAPI, Query, HTTPException, Depends, status, Header
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel, Field, EmailStr
-
-from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Text, ForeignKey, DateTime, func, Index,
-    inspect, text
-)
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
-
+from pydantic import BaseModel, EmailStr
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
-# =========================
-# Config
-# =========================
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")  # set real secret in Render
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
+
+# ----- Config -----
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./pairpro.db")
+JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME_SUPER_SECRET")
 JWT_ALG = "HS256"
-ACCESS_TOKEN_MINUTES = 60 * 24 * 7  # 7 days
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+RESET_TOKEN_MINUTES = 30
 
-# =========================
-# App & CORS
-# =========================
-app = FastAPI(title="PairPro API (Auth + Ownership + Reviews)", version="0.5.0")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Allow ANY vercel.app subdomain (preview + production)
+# ----- DB -----
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+Base = declarative_base()
+
+# ----- Models -----
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    role = Column(String(20), nullable=False, default="client")  # "client" | "provider"
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Provider(Base):
+    __tablename__ = "providers"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    rating = Column(Float, nullable=True)
+    service_type = Column(String(120), nullable=True)
+    city = Column(String(120), nullable=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    owner = relationship("User")
+
+class Review(Base):
+    __tablename__ = "reviews"
+    id = Column(Integer, primary_key=True)
+    provider_id = Column(Integer, ForeignKey("providers.id"), nullable=False)
+    stars = Column(Integer, nullable=False)
+    comment = Column(String(1000), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    provider = relationship("Provider")
+
+Base.metadata.create_all(bind=engine)
+
+# ----- FastAPI -----
+app = FastAPI(title="PairPro API", version="0.1.0")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*vercel\.app$",
-    allow_credentials=False,  # not using cookies
+    allow_origins=["*"],  # dev-friendly; tighten later
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# =========================
-# Database
-# =========================
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL env var is not set")
+# ----- Helpers -----
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-db_url = DATABASE_URL
-if db_url.startswith("postgresql://"):
-    # use psycopg v3 driver
-    db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+def hash_password(pw: str) -> str:
+    return pwd_context.hash(pw)
 
-engine = create_engine(
-    db_url,
-    pool_pre_ping=True,
-    connect_args={"sslmode": "require"},
-)
+def verify_password(pw: str, hashed: str) -> bool:
+    return pwd_context.verify(pw, hashed)
 
-SessionLocal = sessionmaker(
-    bind=engine,
-    autoflush=False,
-    autocommit=False,
-    expire_on_commit=False,  # keep objects usable after commit
-)
-Base = declarative_base()
+def create_access_token(sub: str, expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES) -> str:
+    payload = {"sub": sub, "exp": datetime.utcnow() + timedelta(minutes=expires_minutes)}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-# =========================
-# Security helpers
-# =========================
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def decode_token(token: str) -> int:
+    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    return int(payload.get("sub"))
 
-def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+def auth_user(db: Session, email: str, pw: str) -> Optional[User]:
+    user = db.query(User).filter(User.email == email.lower()).one_or_none()
+    if user and verify_password(pw, user.hashed_password):
+        return user
+    return None
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_MINUTES))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALG)
-
-# =========================
-# Models
-# =========================
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, nullable=False, index=True)
-    hashed_password = Column(String, nullable=False)
-    role = Column(String, nullable=False, default="client")  # "client" | "provider"
-
-Index("ix_users_email_unique", User.email, unique=True)
-
-class Provider(Base):
-    __tablename__ = "providers"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    rating = Column(Float, nullable=True)           # avg rating
-    service_type = Column(String, nullable=True)
-    city = Column(String, nullable=True)
-    # ownership (we'll bootstrap this column if missing at startup)
-    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
-
-class Review(Base):
-    __tablename__ = "reviews"
-    id = Column(Integer, primary_key=True, index=True)
-    provider_id = Column(Integer, ForeignKey("providers.id", ondelete="CASCADE"), nullable=False, index=True)
-    stars = Column(Integer, nullable=False)         # 1..5
-    comment = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-# Create tables & ensure owner_user_id exists on providers
-@app.on_event("startup")
-def on_startup():
-    Base.metadata.create_all(bind=engine)
-    # Bootstrap: add owner_user_id column if the table already existed without it
-    with engine.connect() as conn:
-        inspector = inspect(engine)
-        cols = [c["name"] for c in inspector.get_columns("providers")]
-        if "owner_user_id" not in cols:
-            conn.execute(text("ALTER TABLE providers ADD COLUMN owner_user_id INTEGER"))
-            conn.commit()
-
-# =========================
-# Schemas
-# =========================
-# Auth
-class SignupIn(BaseModel):
-    email: EmailStr
-    password: str
-    role: Literal["client", "provider"] = "client"
-
-class UserOut(BaseModel):
-    id: int
-    email: EmailStr
-    role: Literal["client", "provider"]
-    class Config:
-        from_attributes = True
-
+# ----- Schemas -----
 class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
-# Providers
+class SignupIn(BaseModel):
+    email: EmailStr
+    password: str
+    role: str  # "client" | "provider"
+
+class UserOut(BaseModel):
+    id: int
+    email: EmailStr
+    role: str
+
 class ProviderIn(BaseModel):
     name: str
     rating: Optional[float] = None
@@ -155,12 +126,9 @@ class ProviderOut(BaseModel):
     rating: Optional[float] = None
     service_type: Optional[str] = None
     city: Optional[str] = None
-    class Config:
-        from_attributes = True
 
-# Reviews
 class ReviewIn(BaseModel):
-    stars: int = Field(..., ge=1, le=5)
+    stars: int
     comment: Optional[str] = None
 
 class ReviewOut(BaseModel):
@@ -169,184 +137,160 @@ class ReviewOut(BaseModel):
     stars: int
     comment: Optional[str] = None
     created_at: datetime
-    class Config:
-        from_attributes = True
 
-# Stats
-class StatsOut(BaseModel):
-    provider_id: int
-    review_count: int
-    avg_stars: Optional[float] = None
+class ForgotIn(BaseModel):
+    email: EmailStr
 
-# =========================
-# DB / Auth dependencies
-# =========================
-def get_db():
-    db: Session = SessionLocal()
+class ResetIn(BaseModel):
+    token: str
+    new_password: str
+
+# ----- Auth deps -----
+def get_current_user(db: Session = Depends(get_db), authorization: Optional[str] = None) -> User:
+    # read header
+    if not authorization:
+        from fastapi import Request
+        def _extract(req: Request):
+            return req.headers.get("Authorization")
+        authorization = _extract  # noqa
+    # Try reading via fastapi Request directly
+    from fastapi import Request
+    import inspect
+    frame = inspect.currentframe()
+    req: Request = None  # type: ignore
+    while frame:
+        for v in frame.f_locals.values():
+            if isinstance(v, Request):
+                req = v
+                break
+        if req:
+            break
+        frame = frame.f_back
+    token = None
+    if req:
+        auth = req.headers.get("Authorization")
+        if auth and auth.lower().startswith("bearer "):
+            token = auth.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        yield db
-    finally:
-        db.close()
-
-def current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> User:
-    """
-    Expect header: Authorization: Bearer <token>
-    """
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    token = authorization.split(" ", 1)[1]
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        uid = int(payload.get("sub"))
+        uid = decode_token(token)
     except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-
+        raise HTTPException(status_code=401, detail="Invalid token")
     user = db.get(User, uid)
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        raise HTTPException(status_code=401, detail="User not found")
     return user
 
-# =========================
-# Routes: Health
-# =========================
+# ----- Routes -----
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# =========================
-# Routes: Auth
-# =========================
+# Auth
 @app.post("/auth/signup", response_model=UserOut)
 def signup(data: SignupIn, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == data.email.lower()).one_or_none()
-    if existing:
+    exists = db.query(User).filter(User.email == data.email.lower()).first()
+    if exists:
         raise HTTPException(status_code=400, detail="Email already registered")
-    user = User(
-        email=data.email.lower(),
-        hashed_password=hash_password(data.password),
-        role=data.role,
-    )
+    if data.role not in ("client", "provider"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    user = User(email=data.email.lower(), hashed_password=hash_password(data.password), role=data.role)
     db.add(user)
     db.commit()
     db.refresh(user)
-    return user
+    return UserOut(id=user.id, email=user.email, role=user.role)
 
 @app.post("/auth/login", response_model=TokenOut)
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    """
-    Accepts form fields: username (email), password
-    """
-    user = db.query(User).filter(User.email == form.username.lower()).one_or_none()
-    if not user or not verify_password(form.password, user.hashed_password):
+    user = auth_user(db, form.username, form.password)
+    if not user:
         raise HTTPException(status_code=400, detail="Invalid email or password")
-    token = create_access_token({"sub": str(user.id), "role": user.role})
+    token = create_access_token(str(user.id))
     return TokenOut(access_token=token)
 
 @app.get("/auth/me", response_model=UserOut)
-def me(user: User = Depends(current_user)):
-    return user
+def me(user: User = Depends(get_current_user)):
+    return UserOut(id=user.id, email=user.email, role=user.role)
 
-# =========================
-# Routes: Providers
-# =========================
+# Forgot / Reset
+@app.post("/auth/forgot")
+def forgot_password(data: ForgotIn, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == data.email.lower()).one_or_none()
+    if not user:
+        return {"ok": True}
+    payload = {"sub": str(user.id), "kind": "reset", "exp": datetime.utcnow() + timedelta(minutes=RESET_TOKEN_MINUTES)}
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+    reset_url = f"https://{os.getenv('FRONTEND_HOST','pairpro-frontend.vercel.app')}/auth/reset?t={token}"
+    print("PASSWORD RESET LINK:", reset_url)  # dev helper
+    return {"ok": True, "reset_url": reset_url}
+
+@app.post("/auth/reset")
+def reset_password(data: ResetIn, db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(data.token, JWT_SECRET, algorithms=[JWT_ALG])
+        if payload.get("kind") != "reset":
+            raise HTTPException(status_code=400, detail="Invalid token")
+        uid = int(payload.get("sub"))
+    except JWTError:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+    user = db.get(User, uid)
+    if not user:
+        return {"ok": True}
+    if not data.new_password or len(data.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password too short")
+    user.hashed_password = hash_password(data.new_password)
+    db.add(user)
+    db.commit()
+    return {"ok": True}
+
+# Providers
 @app.get("/providers", response_model=List[ProviderOut])
-def list_providers(
-    city: Optional[str] = Query(None),
-    service_type: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
-):
-    query = db.query(Provider)
+def list_providers(city: Optional[str] = None, service: Optional[str] = None, db: Session = Depends(get_db)):
+    q = db.query(Provider)
     if city:
-        query = query.filter(Provider.city.ilike(f"%{city}%"))
-    if service_type:
-        query = query.filter(Provider.service_type.ilike(f"%{service_type}%"))
-    items = query.order_by(Provider.id.asc()).all()
-    return [ProviderOut.model_validate(p, from_attributes=True) for p in items]
-
-@app.get("/providers/{provider_id}", response_model=ProviderOut)
-def get_provider(provider_id: int, db: Session = Depends(get_db)):
-    obj = db.get(Provider, provider_id)
-    if not obj:
-        raise HTTPException(status_code=404, detail="Provider not found")
-    return ProviderOut.model_validate(obj, from_attributes=True)
+        q = q.filter(Provider.city.ilike(f"%{city}%"))
+    if service:
+        q = q.filter(Provider.service_type.ilike(f"%{service}%"))
+    rows = q.order_by(Provider.id.asc()).all()
+    return [ProviderOut(id=r.id, name=r.name, rating=r.rating, service_type=r.service_type, city=r.city) for r in rows]
 
 @app.post("/providers", response_model=ProviderOut)
-def create_provider(p: ProviderIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def create_provider(data: ProviderIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "provider":
-        raise HTTPException(status_code=403, detail="Only providers can create providers")
+        raise HTTPException(status_code=403, detail="Only providers can create profiles")
     obj = Provider(
-        name=p.name,
-        rating=p.rating,
-        service_type=p.service_type,
-        city=p.city,
-        owner_user_id=user.id,   # set owner
+        name=data.name,
+        rating=data.rating,
+        service_type=data.service_type,
+        city=data.city,
+        owner_id=user.id,
     )
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return ProviderOut.model_validate(obj, from_attributes=True)
+    return ProviderOut(id=obj.id, name=obj.name, rating=obj.rating, service_type=obj.service_type, city=obj.city)
 
-@app.get("/me/providers", response_model=List[ProviderOut])
-def my_providers(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    if user.role != "provider":
-        return []
-    rows = db.query(Provider).filter(Provider.owner_user_id == user.id).order_by(Provider.id.asc()).all()
-    return [ProviderOut.model_validate(p, from_attributes=True) for p in rows]
-
-@app.delete("/providers/{provider_id}")
-def delete_provider(provider_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    prov = db.get(Provider, provider_id)
-    if not prov:
+@app.get("/providers/{provider_id}", response_model=ProviderOut)
+def get_provider(provider_id: int, db: Session = Depends(get_db)):
+    p = db.get(Provider, provider_id)
+    if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
-    if user.role != "provider" or prov.owner_user_id != user.id:
-        raise HTTPException(status_code=403, detail="Not allowed")
-    db.delete(prov)
-    db.commit()
-    return {"ok": True}
+    return ProviderOut(id=p.id, name=p.name, rating=p.rating, service_type=p.service_type, city=p.city)
 
-# =========================
-# Routes: Stats
-# =========================
-@app.get("/providers/{provider_id}/stats", response_model=StatsOut)
-def provider_stats(provider_id: int, db: Session = Depends(get_db)):
-    prov = db.get(Provider, provider_id)
-    if not prov:
-        raise HTTPException(status_code=404, detail="Provider not found")
-    count = db.query(func.count(Review.id)).filter(Review.provider_id == provider_id).scalar()
-    avg = db.query(func.avg(Review.stars)).filter(Review.provider_id == provider_id).scalar()
-    return StatsOut(provider_id=provider_id, review_count=int(count or 0), avg_stars=float(avg) if avg is not None else None)
-
-# =========================
-# Routes: Reviews
-# =========================
+# Reviews
 @app.get("/providers/{provider_id}/reviews", response_model=List[ReviewOut])
 def list_reviews(provider_id: int, db: Session = Depends(get_db)):
-    prov = db.get(Provider, provider_id)
-    if not prov:
-        raise HTTPException(status_code=404, detail="Provider not found")
-    rows = (
-        db.query(Review)
-        .filter(Review.provider_id == provider_id)
-        .order_by(Review.created_at.desc())
-        .all()
-    )
-    return [ReviewOut.model_validate(r, from_attributes=True) for r in rows]
+    rows = db.query(Review).filter(Review.provider_id == provider_id).order_by(Review.id.desc()).all()
+    return [ReviewOut(id=r.id, provider_id=r.provider_id, stars=r.stars, comment=r.comment, created_at=r.created_at) for r in rows]
 
 @app.post("/providers/{provider_id}/reviews", response_model=ReviewOut)
-def create_review(provider_id: int, r: ReviewIn, db: Session = Depends(get_db)):
+def add_review(provider_id: int, data: ReviewIn, db: Session = Depends(get_db)):
     prov = db.get(Provider, provider_id)
     if not prov:
         raise HTTPException(status_code=404, detail="Provider not found")
-
-    review = Review(provider_id=provider_id, stars=r.stars, comment=r.comment)
-    db.add(review)
+    r = Review(provider_id=provider_id, stars=data.stars, comment=data.comment)
+    db.add(r)
     db.commit()
-    db.refresh(review)
-
-    # recalc provider avg
-    agg = db.query(func.avg(Review.stars)).filter(Review.provider_id == provider_id).scalar()
-    prov.rating = float(agg) if agg is not None else None
-    db.add(prov)
-    db.commit()
-
-    return ReviewOut.model_validate(review, from_attributes=True)
+    db.refresh(r)
+    return ReviewOut(id=r.id, provider_id=r.provider_id, stars=r.stars, comment=r.comment, created_at=r.created_at)

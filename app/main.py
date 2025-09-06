@@ -86,6 +86,7 @@ class Provider(Base):
     rating = Column(Float, nullable=True)           # avg rating
     service_type = Column(String, nullable=True)
     city = Column(String, nullable=True)
+    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
 
 class Review(Base):
     __tablename__ = "reviews"

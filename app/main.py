@@ -2,43 +2,51 @@ import os
 from datetime import datetime, timedelta
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, Query, HTTPException, Depends, status
+from fastapi import FastAPI, Query, HTTPException, Depends, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field, EmailStr
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Text, ForeignKey, DateTime, func, Index
+    create_engine, Column, Integer, String, Float, Text, ForeignKey, DateTime, func, Index,
+    inspect, text
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
-# ---------- Config ----------
+# =========================
+# Config
+# =========================
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")  # set real secret in Render
 JWT_ALG = "HS256"
 ACCESS_TOKEN_MINUTES = 60 * 24 * 7  # 7 days
 
-# ---------- FastAPI ----------
-app = FastAPI(title="PairPro API (Auth + Reviews)", version="0.4.0")
+# =========================
+# App & CORS
+# =========================
+app = FastAPI(title="PairPro API (Auth + Ownership + Reviews)", version="0.5.0")
 
-# Allow any vercel.app (preview + prod)
+# Allow ANY vercel.app subdomain (preview + production)
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https://.*vercel\.app$",
-    allow_credentials=False,
+    allow_credentials=False,  # not using cookies
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------- Database ----------
+# =========================
+# Database
+# =========================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL env var is not set")
 
 db_url = DATABASE_URL
 if db_url.startswith("postgresql://"):
+    # use psycopg v3 driver
     db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
 engine = create_engine(
@@ -46,6 +54,7 @@ engine = create_engine(
     pool_pre_ping=True,
     connect_args={"sslmode": "require"},
 )
+
 SessionLocal = sessionmaker(
     bind=engine,
     autoflush=False,
@@ -54,7 +63,9 @@ SessionLocal = sessionmaker(
 )
 Base = declarative_base()
 
-# ---------- Security helpers ----------
+# =========================
+# Security helpers
+# =========================
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_password(plain: str) -> str:
@@ -69,7 +80,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALG)
 
-# ---------- Models ----------
+# =========================
+# Models
+# =========================
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -86,6 +99,7 @@ class Provider(Base):
     rating = Column(Float, nullable=True)           # avg rating
     service_type = Column(String, nullable=True)
     city = Column(String, nullable=True)
+    # ownership (we'll bootstrap this column if missing at startup)
     owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
 
 class Review(Base):
@@ -96,12 +110,21 @@ class Review(Base):
     comment = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-# Create any missing tables at startup
+# Create tables & ensure owner_user_id exists on providers
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)
+    # Bootstrap: add owner_user_id column if the table already existed without it
+    with engine.connect() as conn:
+        inspector = inspect(engine)
+        cols = [c["name"] for c in inspector.get_columns("providers")]
+        if "owner_user_id" not in cols:
+            conn.execute(text("ALTER TABLE providers ADD COLUMN owner_user_id INTEGER"))
+            conn.commit()
 
-# ---------- Schemas ----------
+# =========================
+# Schemas
+# =========================
 # Auth
 class SignupIn(BaseModel):
     email: EmailStr
@@ -155,7 +178,9 @@ class StatsOut(BaseModel):
     review_count: int
     avg_stars: Optional[float] = None
 
-# ---------- DB dep ----------
+# =========================
+# DB / Auth dependencies
+# =========================
 def get_db():
     db: Session = SessionLocal()
     try:
@@ -163,16 +188,9 @@ def get_db():
     finally:
         db.close()
 
-# ---------- Auth deps ----------
-def get_current_user(token: str = Depends(OAuth2PasswordRequestForm)):
-    # NOTE: This is a placeholder; we’ll use proper header dep below.
-    ...
-
-from fastapi import Header
-
 def current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> User:
     """
-    Expect 'Authorization: Bearer <token>'
+    Expect header: Authorization: Bearer <token>
     """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
@@ -188,15 +206,18 @@ def current_user(authorization: Optional[str] = Header(None), db: Session = Depe
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
 
-# ---------- Routes: Health ----------
+# =========================
+# Routes: Health
+# =========================
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# ---------- Routes: Auth ----------
+# =========================
+# Routes: Auth
+# =========================
 @app.post("/auth/signup", response_model=UserOut)
 def signup(data: SignupIn, db: Session = Depends(get_db)):
-    # check existing email
     existing = db.query(User).filter(User.email == data.email.lower()).one_or_none()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -225,7 +246,9 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 def me(user: User = Depends(current_user)):
     return user
 
-# ---------- Routes: Providers ----------
+# =========================
+# Routes: Providers
+# =========================
 @app.get("/providers", response_model=List[ProviderOut])
 def list_providers(
     city: Optional[str] = Query(None),
@@ -249,7 +272,6 @@ def get_provider(provider_id: int, db: Session = Depends(get_db)):
 
 @app.post("/providers", response_model=ProviderOut)
 def create_provider(p: ProviderIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    # Only providers can create provider profile
     if user.role != "provider":
         raise HTTPException(status_code=403, detail="Only providers can create providers")
     obj = Provider(
@@ -257,13 +279,34 @@ def create_provider(p: ProviderIn, user: User = Depends(current_user), db: Sessi
         rating=p.rating,
         service_type=p.service_type,
         city=p.city,
+        owner_user_id=user.id,   # set owner
     )
     db.add(obj)
     db.commit()
     db.refresh(obj)
     return ProviderOut.model_validate(obj, from_attributes=True)
 
-# Stats
+@app.get("/me/providers", response_model=List[ProviderOut])
+def my_providers(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if user.role != "provider":
+        return []
+    rows = db.query(Provider).filter(Provider.owner_user_id == user.id).order_by(Provider.id.asc()).all()
+    return [ProviderOut.model_validate(p, from_attributes=True) for p in rows]
+
+@app.delete("/providers/{provider_id}")
+def delete_provider(provider_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    prov = db.get(Provider, provider_id)
+    if not prov:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    if user.role != "provider" or prov.owner_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    db.delete(prov)
+    db.commit()
+    return {"ok": True}
+
+# =========================
+# Routes: Stats
+# =========================
 @app.get("/providers/{provider_id}/stats", response_model=StatsOut)
 def provider_stats(provider_id: int, db: Session = Depends(get_db)):
     prov = db.get(Provider, provider_id)
@@ -273,7 +316,9 @@ def provider_stats(provider_id: int, db: Session = Depends(get_db)):
     avg = db.query(func.avg(Review.stars)).filter(Review.provider_id == provider_id).scalar()
     return StatsOut(provider_id=provider_id, review_count=int(count or 0), avg_stars=float(avg) if avg is not None else None)
 
-# ---------- Routes: Reviews ----------
+# =========================
+# Routes: Reviews
+# =========================
 @app.get("/providers/{provider_id}/reviews", response_model=List[ReviewOut])
 def list_reviews(provider_id: int, db: Session = Depends(get_db)):
     prov = db.get(Provider, provider_id)
@@ -298,7 +343,7 @@ def create_review(provider_id: int, r: ReviewIn, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(review)
 
-    # recalc
+    # recalc provider avg
     agg = db.query(func.avg(Review.stars)).filter(Review.provider_id == provider_id).scalar()
     prov.rating = float(agg) if agg is not None else None
     db.add(prov)

@@ -21,12 +21,13 @@ if not RAW_DATABASE_URL:
     DATABASE_URL = "sqlite:///./pairpro.db"
 else:
     url = RAW_DATABASE_URL
+    # Use psycopg v3 driver
     if url.startswith("postgres://"):
-        url = "postgresql+psycopg2://" + url[len("postgres://"):]
+        url = "postgresql+psycopg://" + url[len("postgres://"):]
     elif url.startswith("postgresql://"):
-        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
     DATABASE_URL = url
-
+    
 JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME_SUPER_SECRET")
 JWT_ALG = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days

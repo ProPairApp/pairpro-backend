@@ -15,15 +15,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
-@app.get("/debug/db")
-def debug_db(db: Session = Depends(get_db)):
-    try:
-        db.execute(text("SELECT 1"))
-        return {"db": "ok"}
-    except Exception as e:
-        # surfaces the actual db error instead of generic 500
-        return {"db": "error", "detail": str(e)}
-
 # ---------------- Config: DB with dev-safe fallback ----------------
 RAW_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if not RAW_DATABASE_URL:

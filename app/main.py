@@ -11,7 +11,7 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean
+    create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean, text
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
@@ -133,6 +133,14 @@ def get_db():
         yield db
     finally:
         db.close()
+# --- Debug DB connectivity (temporary) ---
+@app.get("/debug/db")
+def debug_db(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+        return {"db": "ok"}
+    except Exception as e:
+        return {"db": "error", "detail": str(e)}
 
 def hash_password(pw: str) -> str:
     return pwd_context.hash(pw)

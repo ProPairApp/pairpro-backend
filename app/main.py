@@ -113,9 +113,14 @@ Base.metadata.create_all(bind=engine)
 # ---------------- FastAPI App ----------------
 app = FastAPI(title="PairPro API", version="0.3.0")
 
+# CORS: allow your Vercel site + localhost
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # dev-friendly, tighten later
+    allow_origins=[
+        "http://localhost:3000",            # local dev
+        "https://pairpro-frontend.vercel.app",  # your production frontend
+    ],
+    allow_origin_regex=r"https://.*\.vercel\.app",  # allow all Vercel previews
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

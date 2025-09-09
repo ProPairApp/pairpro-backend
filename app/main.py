@@ -11,7 +11,7 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean, text
+    create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean, text, func
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
@@ -330,16 +330,23 @@ def list_providers(city: Optional[str] = None, service: Optional[str] = None, db
         q = q.filter(Provider.city.ilike(f"%{city}%"))
     if service:
         q = q.filter(Provider.service_type.ilike(f"%{service}%"))
-    rows = q.order_by(Provider.rating.desc().nullslast(), Provider.id.asc()).all()
-    return [ProviderOut(id=r.id, name=r.name, rating=r.rating, service_type=r.service_type, city=r.city) for r in rows]
+    # DB-safe ordering: treat NULL ratings as -1 to sort lowest
+    rows = q.order_by(func.coalesce(Provider.rating, -1).desc(), Provider.id.asc()).all()
+    return [
+        ProviderOut(id=r.id, name=r.name, rating=r.rating, service_type=r.service_type, city=r.city)
+        for r in rows
+    ]
 
 @app.get("/providers/recommendations", response_model=List[ProviderOut])
 def recommended(city: str, service: Optional[str] = None, db: Session = Depends(get_db)):
     q = db.query(Provider).filter(Provider.city.ilike(f"%{city}%"))
     if service:
         q = q.filter(Provider.service_type.ilike(f"%{service}%"))
-    rows = q.order_by(Provider.rating.desc().nullslast()).limit(10).all()
-    return [ProviderOut(id=r.id, name=r.name, rating=r.rating, service_type=r.service_type, city=r.city) for r in rows]
+    rows = q.order_by(func.coalesce(Provider.rating, -1).desc(), Provider.id.asc()).limit(10).all()
+    return [
+        ProviderOut(id=r.id, name=r.name, rating=r.rating, service_type=r.service_type, city=r.city)
+        for r in rows
+    ]
 
 @app.post("/providers", response_model=ProviderOut)
 def create_provider(data: ProviderIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -369,6 +376,14 @@ def add_review(provider_id: int, data: ReviewIn, db: Session = Depends(get_db)):
     r = Review(provider_id=provider_id, stars=data.stars, comment=data.comment)
     db.add(r); db.commit(); db.refresh(r)
     return ReviewOut(id=r.id, provider_id=r.provider_id, stars=r.stars, comment=r.comment, created_at=r.created_at)
+
+@app.get("/debug/providers")
+def debug_providers(db: Session = Depends(get_db)):
+    try:
+        rows = db.query(Provider).all()
+        return {"count": len(rows)}
+    except Exception as e:
+        return {"error": str(e)}
 
 # ---------------- Jobs (Hires) ----------------
 @app.post("/jobs", response_model=JobDetailOut)

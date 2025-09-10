@@ -15,6 +15,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
+from sqlalchemy import inspect
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+
+
 # ---------------- Config: DB with dev-safe fallback ----------------
 RAW_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if not RAW_DATABASE_URL:
@@ -321,6 +325,14 @@ def reset_password(data: ResetIn, db: Session = Depends(get_db)):
     user.hashed_password = hash_password(data.new_password)
     db.add(user); db.commit()
     return {"ok": True}
+
+@app.get("/debug/tables")
+def debug_tables():
+    try:
+        insp = inspect(engine)
+        return {"tables": insp.get_table_names()}
+    except Exception as e:
+        return {"error": str(e)}
 
 # Providers + Reviews + Recommendations
 @app.get("/providers", response_model=List[ProviderOut])

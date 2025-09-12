@@ -334,6 +334,24 @@ def debug_tables():
     except Exception as e:
         return {"error": str(e)}
 
+from sqlalchemy import inspect  # (you already added this earlier)
+
+@app.get("/debug/columns/{table}")
+def debug_columns(table: str):
+    try:
+        insp = inspect(engine)
+        cols = []
+        for c in insp.get_columns(table):
+            cols.append({
+                "name": c.get("name"),
+                "type": str(c.get("type")),
+                "nullable": c.get("nullable"),
+                "default": str(c.get("default")),
+            })
+        return {"table": table, "columns": cols}
+    except Exception as e:
+        return {"error": str(e)}
+
 # Providers + Reviews + Recommendations
 @app.get("/providers", response_model=List[ProviderOut])
 def list_providers(city: Optional[str] = None, service: Optional[str] = None, db: Session = Depends(get_db)):

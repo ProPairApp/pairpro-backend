@@ -61,7 +61,7 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="client")  # client | provider
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # created_at removed for now because the DB table doesn't have it
 
 class Provider(Base):
     __tablename__ = "providers"

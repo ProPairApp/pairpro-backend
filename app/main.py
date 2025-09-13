@@ -162,8 +162,28 @@ def decode_token(token: str) -> int:
 
 # Extract bearer token and get current user
 def get_current_user(db: Session = Depends(get_db)) -> User:
-    from fastapi import Request
-    request: Request
+    from fastapi import Header
+def get_current_user(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> User:
+    # Expect: Authorization: Bearer <token>
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        uid = decode_token(token)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.get(User, uid)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
     # Find Request object from dependency stack
     import inspect

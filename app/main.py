@@ -1,9 +1,10 @@
 # app/main.py
+
 import os, hashlib
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
@@ -11,33 +12,30 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean, text, func
+    create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
-from sqlalchemy import inspect
-from sqlalchemy.exc import SQLAlchemyError, IntegrityError
-
-
-# ---------------- Config: DB with dev-safe fallback ----------------
+# ---------------- Config ----------------
 RAW_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if not RAW_DATABASE_URL:
+    # local fallback
     DATABASE_URL = "sqlite:///./pairpro.db"
 else:
     url = RAW_DATABASE_URL
-    # Use psycopg v3 driver
+    # prefer psycopg v3 driver
     if url.startswith("postgres://"):
         url = "postgresql+psycopg://" + url[len("postgres://"):]
     elif url.startswith("postgresql://"):
         url = "postgresql+psycopg://" + url[len("postgresql://"):]
     DATABASE_URL = url
-    
+
 JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME_SUPER_SECRET")
 JWT_ALG = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 RESET_TOKEN_MINUTES = 30
 
-# (Optional) Cloudinary for photo uploads
+# Optional Cloudinary (for job photos direct upload signing)
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
 CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
@@ -61,7 +59,7 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="client")  # client | provider
-    # created_at removed for now because the DB table doesn't have it
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Provider(Base):
     __tablename__ = "providers"
@@ -83,7 +81,6 @@ class Review(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     provider = relationship("Provider")
 
-# NEW: jobs / job_photos / job_plans — these tables must exist in your DB
 class Job(Base):
     __tablename__ = "jobs"
     id = Column(Integer, primary_key=True)
@@ -111,40 +108,31 @@ class JobPlan(Base):
     done = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-# Create tables that don't exist (safe)
+# Create tables if missing
 Base.metadata.create_all(bind=engine)
 
-# ---------------- FastAPI App ----------------
-app = FastAPI(title="PairPro API", version="0.3.0")
+# ---------------- App & CORS ----------------
+app = FastAPI(title="PairPro API", version="0.4.0")
 
-# CORS: allow your Vercel site + localhost
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",            # local dev
-        "https://pairpro-frontend.vercel.app",  # your production frontend
+        "http://localhost:3000",
+        "https://pairpro-frontend.vercel.app",
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",  # allow all Vercel previews
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------- Utils ----------------
+# ---------------- Helpers ----------------
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-# --- Debug DB connectivity (temporary) ---
-@app.get("/debug/db")
-def debug_db(db: Session = Depends(get_db)):
-    try:
-        db.execute(text("SELECT 1"))
-        return {"db": "ok"}
-    except Exception as e:
-        return {"db": "error", "detail": str(e)}
 
 def hash_password(pw: str) -> str:
     return pwd_context.hash(pw)
@@ -160,48 +148,14 @@ def decode_token(token: str) -> int:
     payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
     return int(payload.get("sub"))
 
-# Extract bearer token and get current user
-def get_current_user(db: Session = Depends(get_db)) -> User:
-    from fastapi import Header
+# ✅ Reliable header-based current-user
 def get_current_user(
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> User:
-    # Expect: Authorization: Bearer <token>
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
-
     token = authorization.split(" ", 1)[1].strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    try:
-        uid = decode_token(token)
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user = db.get(User, uid)
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return user
-
-    # Find Request object from dependency stack
-    import inspect
-    frame = inspect.currentframe()
-    request = None  # type: ignore
-    while frame:
-        for v in frame.f_locals.values():
-            if v.__class__.__name__ == "Request":
-                request = v
-                break
-        if request:
-            break
-        frame = frame.f_back  # type: ignore
-
-    if not request:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    auth = request.headers.get("Authorization", "")
-    token = auth.split(" ", 1)[1] if auth.lower().startswith("bearer ") else None
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
@@ -259,13 +213,12 @@ class ResetIn(BaseModel):
     token: str
     new_password: str
 
-# Jobs
 class JobCreateIn(BaseModel):
     title: str
     service_type: str
     city: str
     description: Optional[str] = None
-    photo_urls: Optional[List[str]] = None  # Cloudinary URLs
+    photo_urls: Optional[List[str]] = None
 
 class JobOut(BaseModel):
     id: int
@@ -294,7 +247,7 @@ class PlanItemOut(BaseModel):
 def health():
     return {"ok": True}
 
-# Auth
+# ---- Auth
 @app.post("/auth/signup", response_model=UserOut)
 def signup(data: SignupIn, db: Session = Depends(get_db)):
     exists = db.query(User).filter(User.email == data.email.lower()).first()
@@ -322,8 +275,8 @@ def forgot_password(data: ForgotIn, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email.lower()).one_or_none()
     if not user:
         return {"ok": True}
-    payload = {"sub": str(user.id), "kind": "reset", "exp": datetime.utcnow() + timedelta(minutes=RESET_TOKEN_MINUTES)}
-    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+    token = jwt.encode({"sub": str(user.id), "kind": "reset", "exp": datetime.utcnow() + timedelta(minutes=RESET_TOKEN_MINUTES)},
+                       JWT_SECRET, algorithm=JWT_ALG)
     reset_url = f"https://{os.getenv('FRONTEND_HOST','pairpro-frontend.vercel.app')}/auth/reset?t={token}"
     print("PASSWORD RESET LINK:", reset_url)
     return {"ok": True, "reset_url": reset_url}
@@ -346,37 +299,7 @@ def reset_password(data: ResetIn, db: Session = Depends(get_db)):
     db.add(user); db.commit()
     return {"ok": True}
 
-@app.get("/debug/tables")
-def debug_tables():
-    try:
-        insp = inspect(engine)
-        return {"tables": insp.get_table_names()}
-    except Exception as e:
-        return {"error": str(e)}
-
-from sqlalchemy import inspect  # (you already added this earlier)
-
-@app.get("/debug/columns/{table}")
-def debug_columns(table: str):
-    try:
-        insp = inspect(engine)
-        cols = []
-        for c in insp.get_columns(table):
-            cols.append({
-                "name": c.get("name"),
-                "type": str(c.get("type")),
-                "nullable": c.get("nullable"),
-                "default": str(c.get("default")),
-            })
-        return {"table": table, "columns": cols}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/debug/echoauth")
-def echo_auth_header(authorization: str | None = Header(default=None)):
-    return {"authorization": authorization or "NONE"}
-
-# Providers + Reviews + Recommendations
+# ---- Providers + Reviews
 @app.get("/providers", response_model=List[ProviderOut])
 def list_providers(city: Optional[str] = None, service: Optional[str] = None, db: Session = Depends(get_db)):
     q = db.query(Provider)
@@ -384,23 +307,16 @@ def list_providers(city: Optional[str] = None, service: Optional[str] = None, db
         q = q.filter(Provider.city.ilike(f"%{city}%"))
     if service:
         q = q.filter(Provider.service_type.ilike(f"%{service}%"))
-    # DB-safe ordering: treat NULL ratings as -1 to sort lowest
-    rows = q.order_by(func.coalesce(Provider.rating, -1).desc(), Provider.id.asc()).all()
-    return [
-        ProviderOut(id=r.id, name=r.name, rating=r.rating, service_type=r.service_type, city=r.city)
-        for r in rows
-    ]
+    rows = q.order_by(Provider.rating.desc().nullslast(), Provider.id.asc()).all()
+    return [ProviderOut(id=r.id, name=r.name, rating=r.rating, service_type=r.service_type, city=r.city) for r in rows]
 
 @app.get("/providers/recommendations", response_model=List[ProviderOut])
 def recommended(city: str, service: Optional[str] = None, db: Session = Depends(get_db)):
     q = db.query(Provider).filter(Provider.city.ilike(f"%{city}%"))
     if service:
         q = q.filter(Provider.service_type.ilike(f"%{service}%"))
-    rows = q.order_by(func.coalesce(Provider.rating, -1).desc(), Provider.id.asc()).limit(10).all()
-    return [
-        ProviderOut(id=r.id, name=r.name, rating=r.rating, service_type=r.service_type, city=r.city)
-        for r in rows
-    ]
+    rows = q.order_by(Provider.rating.desc().nullslast()).limit(10).all()
+    return [ProviderOut(id=r.id, name=r.name, rating=r.rating, service_type=r.service_type, city=r.city) for r in rows]
 
 @app.post("/providers", response_model=ProviderOut)
 def create_provider(data: ProviderIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -431,15 +347,7 @@ def add_review(provider_id: int, data: ReviewIn, db: Session = Depends(get_db)):
     db.add(r); db.commit(); db.refresh(r)
     return ReviewOut(id=r.id, provider_id=r.provider_id, stars=r.stars, comment=r.comment, created_at=r.created_at)
 
-@app.get("/debug/providers")
-def debug_providers(db: Session = Depends(get_db)):
-    try:
-        rows = db.query(Provider).all()
-        return {"count": len(rows)}
-    except Exception as e:
-        return {"error": str(e)}
-
-# ---------------- Jobs (Hires) ----------------
+# ---- Jobs / Plans
 @app.post("/jobs", response_model=JobDetailOut)
 def create_job(payload: JobCreateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "client":
@@ -473,7 +381,6 @@ def my_jobs(user: User = Depends(get_current_user), db: Session = Depends(get_db
     if user.role == "client":
         q = q.filter(Job.client_id == user.id)
     else:
-        # Provider sees jobs assigned to any provider profile they own
         my_provs = db.query(Provider.id).filter(Provider.owner_id == user.id).all()
         ids = [p[0] for p in my_provs]
         q = q.filter(Job.provider_id.in_(ids)) if ids else q.filter(Job.id == -1)
@@ -513,7 +420,6 @@ def assign_job(job_id: int, provider_id: int, user: User = Depends(get_current_u
         description=job.description, status=job.status, provider_id=job.provider_id, created_at=job.created_at
     )
 
-# Plans per Job
 @app.get("/jobs/{job_id}/plans", response_model=List[PlanItemOut])
 def list_plans(job_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     items = db.query(JobPlan).filter(JobPlan.job_id == job_id).order_by(JobPlan.id.asc()).all()
@@ -530,17 +436,35 @@ def add_plan(job_id: int, payload: PlanItemIn, user: User = Depends(get_current_
     db.add(it); db.commit(); db.refresh(it)
     return PlanItemOut(id=it.id, text=it.text, done=it.done, created_at=it.created_at)
 
-# ---------------- Cloudinary upload signing ----------------
+# ---- Cloudinary upload signing
 @app.post("/uploads/sign")
 def sign_upload(user: User = Depends(get_current_user)):
-    """
-    Returns a signature + timestamp for direct upload to Cloudinary.
-    Frontend will POST to: https://api.cloudinary.com/v1_1/<cloud_name>/image/upload
-    fields: file, api_key, timestamp, signature, (optionally folder)
-    """
     if not (CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET):
         raise HTTPException(status_code=500, detail="Cloudinary not configured")
     ts = int(datetime.utcnow().timestamp())
-    to_sign = f"timestamp={ts}{CLOUDINARY_API_SECRET}"
-    signature = hashlib.sha1(to_sign.encode("utf-8")).hexdigest()
+    signature = hashlib.sha1(f"timestamp={ts}{CLOUDINARY_API_SECRET}".encode("utf-8")).hexdigest()
     return {"cloud_name": CLOUDINARY_CLOUD_NAME, "api_key": CLOUDINARY_API_KEY, "timestamp": ts, "signature": signature}
+
+# ---------------- Debug helpers ----------------
+@app.get("/debug/echoauth")
+def echo_auth_header(authorization: str | None = Header(default=None)):
+    return {"authorization": authorization or "NONE"}
+
+@app.get("/debug/db")
+def debug_db():
+    return {"db": "ok", "driver": DATABASE_URL.split("://", 1)[0]}
+
+@app.get("/debug/providers")
+def debug_providers(db: Session = Depends(get_db)):
+    return {"count": db.query(Provider).count()}
+
+@app.get("/debug/tables")
+def debug_tables():
+    # very simple visibility only
+    try:
+        from sqlalchemy import inspect
+        insp = inspect(engine)
+        return {"tables": insp.get_table_names()}
+    except Exception as e:
+        return {"error": str(e)}
+ 

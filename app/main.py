@@ -372,6 +372,10 @@ def debug_columns(table: str):
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/debug/echoauth")
+def echo_auth_header(authorization: str | None = Header(default=None)):
+    return {"authorization": authorization or "NONE"}
+
 # Providers + Reviews + Recommendations
 @app.get("/providers", response_model=List[ProviderOut])
 def list_providers(city: Optional[str] = None, service: Optional[str] = None, db: Session = Depends(get_db)):

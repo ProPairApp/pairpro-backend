@@ -2,9 +2,9 @@
 
 import os, hashlib
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
@@ -12,18 +12,17 @@ from jose import jwt, JWTError
 from passlib.context import CryptContext
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean
+    create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean,
+    func
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 
 # ---------------- Config ----------------
 RAW_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if not RAW_DATABASE_URL:
-    # local fallback
     DATABASE_URL = "sqlite:///./pairpro.db"
 else:
     url = RAW_DATABASE_URL
-    # prefer psycopg v3 driver
     if url.startswith("postgres://"):
         url = "postgresql+psycopg://" + url[len("postgres://"):]
     elif url.startswith("postgresql://"):
@@ -35,7 +34,10 @@ JWT_ALG = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 RESET_TOKEN_MINUTES = 30
 
-# Optional Cloudinary (for job photos direct upload signing)
+COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "pairpro_token")
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "https://pairpro-frontend.vercel.app")
+
+# Cloudinary
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
 CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
@@ -112,7 +114,7 @@ class JobPlan(Base):
 Base.metadata.create_all(bind=engine)
 
 # ---------------- App & CORS ----------------
-app = FastAPI(title="PairPro API", version="0.4.0")
+app = FastAPI(title="PairPro API", version="0.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -148,14 +150,41 @@ def decode_token(token: str) -> int:
     payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
     return int(payload.get("sub"))
 
-# ✅ Reliable header-based current-user
+def read_token_from_header_or_cookie(
+    authorization: Optional[str],
+    request: Request
+) -> Optional[str]:
+    # 1) Authorization: Bearer xxx
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        if token:
+            return token
+    # 2) Cookie (HttpOnly)
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie:
+        return cookie
+    return None
+
+def set_auth_cookie(response: Response, token: str):
+    # SameSite=None + Secure so it works on Vercel ↔ Render
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+        domain=None,  # let the browser scope it automatically
+    )
+
+# ✅ current-user: supports Bearer header OR HttpOnly cookie
 def get_current_user(
-    authorization: str | None = Header(default=None),
+    request: Request,
     db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
 ) -> User:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    token = authorization.split(" ", 1)[1].strip()
+    token = read_token_from_header_or_cookie(authorization, request)
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
@@ -243,6 +272,10 @@ class PlanItemOut(BaseModel):
     created_at: datetime
 
 # ---------------- Routes ----------------
+@app.get("/")
+def root():
+    return {"ok": True, "service": "pairpro-backend", "version": "0.5.0"}
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -260,16 +293,20 @@ def signup(data: SignupIn, db: Session = Depends(get_db)):
     return UserOut(id=user.id, email=user.email, role=user.role)
 
 @app.post("/auth/login", response_model=TokenOut)
-def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(response: Response, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == form.username.lower()).one_or_none()
     if not user or not verify_password(form.password, user.hashed_password):
         raise HTTPException(status_code=400, detail="Invalid email or password")
-    return TokenOut(access_token=create_access_token(str(user.id)))
+    token = create_access_token(str(user.id))
+    # set HttpOnly cookie for browser auth
+    set_auth_cookie(response, token)
+    return TokenOut(access_token=token)
 
 @app.get("/auth/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)):
     return UserOut(id=user.id, email=user.email, role=user.role)
 
+# ---- Password reset
 @app.post("/auth/forgot")
 def forgot_password(data: ForgotIn, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email.lower()).one_or_none()
@@ -301,7 +338,11 @@ def reset_password(data: ResetIn, db: Session = Depends(get_db)):
 
 # ---- Providers + Reviews
 @app.get("/providers", response_model=List[ProviderOut])
-def list_providers(city: Optional[str] = None, service: Optional[str] = None, db: Session = Depends(get_db)):
+def list_providers(
+    city: Optional[str] = None,
+    service: Optional[str] = Query(None, alias="service_type"),  # accept ?service_type= as well
+    db: Session = Depends(get_db)
+):
     q = db.query(Provider)
     if city:
         q = q.filter(Provider.city.ilike(f"%{city}%"))
@@ -332,6 +373,15 @@ def get_provider(provider_id: int, db: Session = Depends(get_db)):
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
     return ProviderOut(id=p.id, name=p.name, rating=p.rating, service_type=p.service_type, city=p.city)
+
+# Tiny stats endpoint your UI can call
+@app.get("/providers/{provider_id}/stats")
+def provider_stats(provider_id: int, db: Session = Depends(get_db)):
+    row = db.query(
+        func.count(Review.id).label("review_count"),
+        func.avg(Review.stars).label("avg_stars")
+    ).filter(Review.provider_id == provider_id).one()
+    return {"provider_id": provider_id, "review_count": int(row.review_count or 0), "avg_stars": float(row.avg_stars) if row.avg_stars is not None else None}
 
 @app.get("/providers/{provider_id}/reviews", response_model=List[ReviewOut])
 def list_reviews(provider_id: int, db: Session = Depends(get_db)):
@@ -365,8 +415,8 @@ def create_job(payload: JobCreateIn, user: User = Depends(get_current_user), db:
     photos = []
     if payload.photo_urls:
         for url in payload.photo_urls[:12]:
-            jp = JobPhoto(job_id=job.id, url=url)
-            db.add(jp); photos.append(url)
+            db.add(JobPhoto(job_id=job.id, url=url))
+            photos.append(url)
         db.commit()
 
     return JobDetailOut(
@@ -442,6 +492,7 @@ def sign_upload(user: User = Depends(get_current_user)):
     if not (CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET):
         raise HTTPException(status_code=500, detail="Cloudinary not configured")
     ts = int(datetime.utcnow().timestamp())
+    # If you later add more params (e.g., folder=jobs), they must be in this string as well.
     signature = hashlib.sha1(f"timestamp={ts}{CLOUDINARY_API_SECRET}".encode("utf-8")).hexdigest()
     return {"cloud_name": CLOUDINARY_CLOUD_NAME, "api_key": CLOUDINARY_API_KEY, "timestamp": ts, "signature": signature}
 
@@ -460,11 +511,9 @@ def debug_providers(db: Session = Depends(get_db)):
 
 @app.get("/debug/tables")
 def debug_tables():
-    # very simple visibility only
     try:
         from sqlalchemy import inspect
         insp = inspect(engine)
         return {"tables": insp.get_table_names()}
     except Exception as e:
         return {"error": str(e)}
- 

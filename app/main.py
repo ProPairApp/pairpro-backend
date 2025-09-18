@@ -280,6 +280,14 @@ def root():
 def health():
     return {"ok": True}
 
+@app.get("/debug/cloudinary")
+def debug_cloudinary():
+    return {
+        "has_cloud_name": bool(CLOUDINARY_CLOUD_NAME),
+        "has_key": bool(CLOUDINARY_API_KEY),
+        "has_secret": bool(CLOUDINARY_API_SECRET),
+    }
+
 # ---- Auth
 @app.post("/auth/signup", response_model=UserOut)
 def signup(data: SignupIn, db: Session = Depends(get_db)):

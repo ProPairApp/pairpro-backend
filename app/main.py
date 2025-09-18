@@ -62,6 +62,9 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="client")  # client | provider
     created_at = Column(DateTime, default=datetime.utcnow)
+    name = Column(String(120), nullable=True)
+    last_name = Column(String(120), nullable=True)
+    username = Column(String(60), unique=True, nullable=True)
 
 class Provider(Base):
     __tablename__ = "providers"
@@ -205,11 +208,20 @@ class SignupIn(BaseModel):
     email: EmailStr
     password: str
     role: str  # client | provider
+    name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
 
 class UserOut(BaseModel):
     id: int
     email: EmailStr
     role: str
+    name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
+
+    class Config:
+        orm_mode = True
 
 class ProviderIn(BaseModel):
     name: str
